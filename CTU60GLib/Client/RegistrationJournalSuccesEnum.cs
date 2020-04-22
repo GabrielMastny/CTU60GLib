@@ -8,6 +8,8 @@ namespace CTU60GLib.Client
 	{
 		Pending,
 		Successfull,
-		Unsuccessfull
+		Unsuccessfull,
+		UnsuccessfullDraft,
+		UnsuccessfullWaiting
 	}
 }

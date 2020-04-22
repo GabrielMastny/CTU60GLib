@@ -11,13 +11,19 @@ using System.Threading.Tasks;
 using Client.Json;
 using Newtonsoft.Json.Linq;
 using CTU60GLib.CollisionTable;
+using System.Text.RegularExpressions;
+using System.Runtime.CompilerServices;
 
 namespace CTU60GLib.Client
 {
     public class CTUClient
     {
+        private const string baseUrl = "https://60ghz.ctu.cz";
+        private const string createFSPTPUrl = "/en/create-fs";
+        private const string createWIGIGUrl = "/en/create-wigig";
+        private const string stationUrl = "/en/station";
+        private const string publishUrl = "/en/publish";
         private HttpClient httpClient;
-        private Uri baseAddres = new Uri("https://60ghz.ctu.cz");
         private string frontEndToken ="";
 
         public CTUClient()
@@ -28,7 +34,7 @@ namespace CTU60GLib.Client
             };
 
             httpClient = new HttpClient(handler);
-            httpClient.BaseAddress = baseAddres;
+            httpClient.BaseAddress = new Uri(baseUrl);
             httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
             httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             httpClient.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("gzip"));
@@ -40,16 +46,11 @@ namespace CTU60GLib.Client
         public async Task LoginAsync(string login,string pass)
         {
             HttpResponseMessage response = await httpClient.GetAsync("prihlaseni");
-            if(response.StatusCode == System.Net.HttpStatusCode.OK)
+            if(response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                throw new Exceptions.WebServerException();
             }
-            else
-            {
-                //todo
-                throw new NotImplementedException();
-            }
-
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
             Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend",frontEndToken },
@@ -72,199 +73,313 @@ namespace CTU60GLib.Client
 
             return mdnode.Attributes["content"].Value;
         }
-        private async Task<List<CollisionTableItem>> GetCloseStations(string html)
+
+        #region P2P
+
+        public async Task<RegistrationJournal> AddPTPConnectionAsync(FixedP2PPair fpP2P)
         {
-            HtmlDocument doc = new HtmlDocument();
-            doc.LoadHtml(html);
-
-            List<CollisionTableItem> collisionItems = new List<CollisionTableItem>();
-            try
+            RegistrationJournal regJournal = new RegistrationJournal();
+            if (fpP2P == null)
             {
-                
-                var closeStations = from table in doc.DocumentNode.SelectNodes("//*[@id=\"stations-grid-container\"]/table").Cast<HtmlNode>()
-                            from tbody in table.SelectNodes("tbody").Cast<HtmlNode>()
-                            from rows in tbody.SelectNodes("tr").Cast<HtmlNode>()
-                            select rows;
-                foreach (var item in closeStations)
-                {
-                    var columns = item.SelectNodes("td");
-                    string id = columns[1].ChildNodes[0].InnerText;
-                    bool owned = columns[1].ChildNodes[1].ChildNodes[0]?.InnerText == "face";
-                    string name = columns[2].InnerText;
-                    string link = baseAddres.ToString() + columns[2].SelectSingleNode("a").GetAttributeValue("href","");
-                    bool collision = columns[3].InnerText == "Yes";
-                    string type = columns[4].InnerText;
-                    collisionItems.Add(new CollisionTableItem(id, owned, name, collision, type, link));
-                }
+                regJournal.ThrownException = new Exceptions.MissingParameterException("Missing fixed p2p pair");
+                return regJournal;
             }
-            catch (Exception e)
-            {
-
-                throw;
-            }
-
-            return collisionItems;
-
+            regJournal.NextPhase();
+            await PTPLocalisation(fpP2P, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            await PTPTechnicalSpec(fpP2P, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            await PTPCollisionAndPublishing(fpP2P, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            return regJournal;
         }
-        public async Task AddPTPConnectionAsync(FixedP2PPair fpP2P)
+        private async Task PTPLocalisation(FixedP2PPair fpP2P, RegistrationJournal regJournal)
         {
-
-            HttpResponseMessage response = await httpClient.GetAsync("/en/create-fs");
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            HttpResponseMessage response = await httpClient.GetAsync(createFSPTPUrl);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                regJournal.ThrownException = new Exceptions.WebServerException();
+                return;
             }
-            else
-            {
-                //todo
-                throw new NotImplementedException();
-            }
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
             Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend", frontEndToken },
                 {"list-stations","my" },
                 {"Station[a][name]", fpP2P.StationA.Name},
                 {"Station[b][name]",fpP2P.StationB.Name},
-                {"Station[a][lng]", fpP2P.StationA.Longitude },
-                {"Station[a][lat]",fpP2P.StationA.Latitude },
-                {"Station[b][lng]",fpP2P.StationB.Longitude },
-                {"Station[b][lat]",fpP2P.StationB.Latitude }
+                {"Station[a][lng]", fpP2P.StationA.Longitude.ToString() },
+                {"Station[a][lat]",fpP2P.StationA.Latitude.ToString() },
+                {"Station[b][lng]",fpP2P.StationB.Longitude.ToString() },
+                {"Station[b][lat]",fpP2P.StationB.Latitude.ToString() }
             };
 
-            response = await httpClient.PostAsync("/en/create-fs", new FormUrlEncodedContent(postContent));
+            response = await httpClient.PostAsync(createFSPTPUrl, new FormUrlEncodedContent(postContent));
 
-            if (response.StatusCode != HttpStatusCode.OK) { }//todo throw exception
-
-
-            response = await httpClient.GetAsync(response.RequestMessage.RequestUri);
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            if (response.StatusCode != HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                regJournal.ThrownException = new Exceptions.WebServerException();
+                return;
             }
-            else
+            regJournal.RegistrationId = response.RequestMessage.RequestUri.ToString().Split('/')[5];
+        }
+        private async Task PTPTechnicalSpec(FixedP2PPair fpP2P, RegistrationJournal regJournal)
+        {
+            string techSpecUrl = $"{stationUrl}/{regJournal.RegistrationId}/2";
+            HttpResponseMessage response = await httpClient.GetAsync(techSpecUrl);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                //todo
-                throw new NotImplementedException();
+                regJournal.ThrownException = new Exceptions.WebServerException();
+                return;
             }
 
-            postContent = new Dictionary<string, string>()
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+            Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend", frontEndToken },
                 {"Station[a][updateStep]","2" },
-                {"Station[a][antenna_volume]",fpP2P.StationA.Volume },
-                {"Station[a][channel_width]",fpP2P.StationA.ChannelWidth},
-                {"Station[a][power]",fpP2P.StationA.Power},
-                {"StationFs[a][frequency]",fpP2P.StationA.Frequency},
-                {"StationFs[a][ratio_signal_interference]","12" }, ///todo
+                {"Station[a][antenna_volume]",fpP2P.StationA.Volume.ToString() },
+                {"Station[a][channel_width]",fpP2P.StationA.ChannelWidth.ToString()},
+                {"Station[a][power]",fpP2P.StationA.Power.ToString()},
+                {"StationFs[a][frequency]",fpP2P.StationA.Frequency.ToString()},
+                {"StationFs[a][ratio_signal_interference]",fpP2P.StationA.RSN.ToString() },
                 {"Station[a][hardware_identifier]",(fpP2P.StationA.SerialNumber == string.Empty)?"0":"1"},
                 {String.Format("Station[a][{0}]",(fpP2P.StationA.SerialNumber == string.Empty)?"macAddress":"serialNumber"),(fpP2P.StationA.SerialNumber == string.Empty)?fpP2P.StationA.MAC:fpP2P.StationA.SerialNumber},
                 {"Station[b][updateStep]","2" },
-                {"Station[b][antenna_volume]",fpP2P.StationB.Volume },
-                {"Station[b][channel_width]",fpP2P.StationB.ChannelWidth},
-                {"Station[b][power]",fpP2P.StationB.Power},
-                {"StationFs[b][frequency]",fpP2P.StationB.Frequency},
-                {"StationFs[b][ratio_signal_interference]","12" }, ///todo
+                {"Station[b][antenna_volume]",fpP2P.StationB.Volume.ToString() },
+                {"Station[b][channel_width]",fpP2P.StationB.ChannelWidth.ToString()},
+                {"Station[b][power]",fpP2P.StationB.Power.ToString()},
+                {"StationFs[b][frequency]",fpP2P.StationB.Frequency.ToString()},
+                {"StationFs[b][ratio_signal_interference]",fpP2P.StationB.RSN.ToString() },
                 {"Station[b][hardware_identifier]",(fpP2P.StationB.SerialNumber == string.Empty)?"0":"1"},
                 {String.Format("Station[b][{0}]",(fpP2P.StationB.SerialNumber == string.Empty)?"macAddress":"serialNumber"),(fpP2P.StationB.SerialNumber == string.Empty)?fpP2P.StationB.MAC:fpP2P.StationB.SerialNumber}
             };
 
-                response = await httpClient.PostAsync(response.RequestMessage.RequestUri, new FormUrlEncodedContent(postContent));
+            response = await httpClient.PostAsync(response.RequestMessage.RequestUri, new FormUrlEncodedContent(postContent));
 
-            if (response.StatusCode != HttpStatusCode.OK) { }//todo throw exception
-
-            response = await httpClient.GetAsync(response.RequestMessage.RequestUri);
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            if (response.StatusCode != HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                regJournal.ThrownException = new Exceptions.WebServerException();
             }
-            else
-            {
-                //todo
-                throw new NotImplementedException();
-            }
-            List<CollisionTableItem> collisions = await GetCloseStations(await response.Content.ReadAsStringAsync());
         }
-        public async Task AddWIGIG_PTP_PTMPConnectionAsync(WigigPTMPUnitInfo wigig)
+        private async Task PTPCollisionAndPublishing(FixedP2PPair fpP2P, RegistrationJournal regJournal)
         {
-            HttpResponseMessage response = await httpClient.GetAsync("/en/create-wigig");
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            string techSpecUrl = $"{stationUrl}/{regJournal.RegistrationId}/3";
+            HttpResponseMessage response = await httpClient.GetAsync(techSpecUrl);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                regJournal.ThrownException = new Exceptions.WebServerException();
+                return;
             }
-            else
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+
+            List<CollisionTableItem> closeStations = await GetFixedPTPStationsFromCollisionTable(await response.Content.ReadAsStringAsync());
+            regJournal.CollisionStations = closeStations.Where(x => x.Collision == true).ToList();
+            regJournal.CloseStations = closeStations.Where(x => x.Collision == false).ToList();
+
+            if (regJournal.CollisionStations.Count > 0)
             {
-                //todo
-                throw new NotImplementedException();
+                regJournal.ThrownException = new Exceptions.CollisionDetectedException();
+                return;
             }
+
+            Dictionary<string, string> postContent = new Dictionary<string, string>()
+            {
+                {"_csrf-frontend", frontEndToken }
+            };
+            string publish = $"{publishUrl}/{regJournal.RegistrationId}"; 
+            response = await httpClient.PostAsync(publish, new FormUrlEncodedContent(postContent));
+
+            if (response.StatusCode != HttpStatusCode.OK)
+            {
+                regJournal.ThrownException = new Exceptions.WebServerException();
+            }
+
+        }
+        private async Task<List<CollisionTableItem>> GetFixedPTPStationsFromCollisionTable(string html)
+        {
+            HtmlDocument doc = new HtmlDocument();
+            doc.LoadHtml(html);
+
+            List<CollisionTableItem> collisionItems = new List<CollisionTableItem>();
+            var closeStations = from table in doc.DocumentNode.SelectNodes("//*[@id=\"stations-grid-container\"]/table").Cast<HtmlNode>()
+                                from tbody in table.SelectNodes("tbody").Cast<HtmlNode>()
+                                from rows in tbody.SelectNodes("tr").Cast<HtmlNode>()
+                                select rows;
+            foreach (var item in closeStations)
+            {
+                var columns = item.SelectNodes("td");
+                if (item.InnerText == "No results found.") break;
+                string id = columns[1].ChildNodes[0].InnerText;
+
+                bool owned = (columns[1].ChildNodes.Count == 2); // another element symbolizes users ownership.
+                string name = columns[2].InnerText;
+                string link = baseUrl + columns[2].SelectSingleNode("a").GetAttributeValue("href", "");
+                bool collision = columns[3].InnerText == "Yes";
+                string type = columns[4].InnerText;
+                collisionItems.Add(new CollisionTableItem(id, owned, name, collision, type, link));
+            }
+
+            return collisionItems;
+
+        }
+
+        #endregion
+
+        #region WIGIG
+        public async Task<RegistrationJournal> AddWIGIG_PTP_PTMPConnectionAsync(WigigPTMPUnitInfo wigig)
+        {
+            RegistrationJournal regJournal = new RegistrationJournal();
+            if (wigig == null)
+            {
+                regJournal.ThrownException = new Exceptions.MissingParameterException("Missing wigig station");
+                return regJournal;
+            }
+            regJournal.NextPhase();
+            await WigigLocalisation(wigig, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            await WigigTechnicalSpec(wigig, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            await WigigCollisionAndPublishing(wigig, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            return regJournal;
+        }
+        private async Task WigigLocalisation(WigigPTMPUnitInfo wigig, RegistrationJournal regJournal)
+        {
+            HttpResponseMessage response = await httpClient.GetAsync(createWIGIGUrl);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                regJournal.ThrownException = new Exceptions.WebServerException();
+                return;
+            }
+
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
             Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend", frontEndToken },
                 {"list-stations","my" },
                 {"Station[name]",wigig.Name },
-                {"Station[lng]",wigig.Longitude },
-                {"Station[lat]",wigig.Latitude },
-                {"StationWigig[direction]",wigig.Orientation }
+                {"Station[lng]",wigig.Longitude.ToString() },
+                {"Station[lat]",wigig.Latitude.ToString() },
+                {"StationWigig[direction]",wigig.Orientation.ToString() }
             };
 
-            response = await httpClient.PostAsync("/en/create-wigig", new FormUrlEncodedContent(postContent));
+            response = await httpClient.PostAsync(createWIGIGUrl, new FormUrlEncodedContent(postContent));
 
-            if (response.StatusCode != HttpStatusCode.OK) { }//todo throw exception
-
-            response = await httpClient.GetAsync(response.RequestMessage.RequestUri);
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            if (response.StatusCode != HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                regJournal.ThrownException = new Exceptions.WebServerException();
             }
-            else
+            regJournal.RegistrationId = response.RequestMessage.RequestUri.ToString().Split('/')[5];
+        }
+        private async Task WigigTechnicalSpec(WigigPTMPUnitInfo wigig, RegistrationJournal regJournal)
+        {
+            string techSpecUrl = $"{stationUrl}/{regJournal.RegistrationId}/2";
+            HttpResponseMessage response = await httpClient.GetAsync(techSpecUrl);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                //todo
-                throw new NotImplementedException();
+                regJournal.ThrownException = new Exceptions.WebServerException();
+                return;
             }
-
-            postContent = new Dictionary<string, string>()
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+            Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend", frontEndToken },
                 {"Station[updateStep]","2" },
-                {"StationWigig[eirp_method]",(wigig.Eirp == string.Empty)?"auto":"manual"},
-                {"StationWigig[eirp]", wigig.Eirp },
-                {"Station[antenna_volume]",wigig.Volume },
-                {"Station[power]",wigig.Power },
-                {"Station[channel_width]",wigig.ChannelWidth },
-                {"StationWigig[is_ptmp]",(int.Parse(wigig.Volume) > 25)?"0":"1" },
+                {"StationWigig[eirp_method]",(wigig.Eirp == null)?"auto":"manual"},
+                {"StationWigig[eirp]", wigig.Eirp.ToString() },
+                {"Station[antenna_volume]",wigig.Volume.ToString() },
+                {"Station[power]",wigig.Power.ToString() },
+                {"Station[channel_width]",wigig.ChannelWidth.ToString() },
+                {"StationWigig[is_ptmp]",(int.Parse(wigig.Volume.ToString()) > 25)?"0":"1" },
                 {"Station[hardware_identifier]",(wigig.SerialNumber == string.Empty)?"0":"1" },
                 {String.Format("Station[{0}]",(wigig.SerialNumber == string.Empty)?"macAddress":"serialNumber"),(wigig.SerialNumber == string.Empty)?wigig.MAC:wigig.SerialNumber}
             };
 
             response = await httpClient.PostAsync(response.RequestMessage.RequestUri, new FormUrlEncodedContent(postContent));
 
-            if (response.StatusCode != HttpStatusCode.OK) { }//todo throw exception
-
-            response = await httpClient.GetAsync(response.RequestMessage.RequestUri);
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            if (response.StatusCode != HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                regJournal.ThrownException = new Exceptions.WebServerException();
+                return;
             }
-            else
-            {
-                //todo
-                throw new NotImplementedException();
-            }
+            string pp = "pp";
+            string kk = "pp";
 
-            List<CollisionTableItem> collisions = await GetCloseStations(await response.Content.ReadAsStringAsync());
+            var q = pp.GetHashCode();
+            var qq = kk.GetHashCode();
         }
+        private async Task WigigCollisionAndPublishing(WigigPTMPUnitInfo wigig, RegistrationJournal regJournal)
+        {
+            string collUrl = $"{stationUrl}/{regJournal.RegistrationId}/3";
+            HttpResponseMessage response = await httpClient.GetAsync(collUrl);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                regJournal.ThrownException = new Exceptions.WebServerException();
+            }
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+            List<CollisionTableItem> collisions = await GetWigigStationsFromCollisionTable(await response.Content.ReadAsStringAsync());
+            regJournal.CollisionStations = collisions.Where(x => x.Collision == true).ToList();
+            regJournal.CloseStations = collisions.Where(x => x.Collision == false).ToList();
+
+            if (regJournal.CollisionStations.Count > 0)
+            {
+                regJournal.ThrownException = new Exceptions.CollisionDetectedException(); 
+                return;
+            }
+
+            Dictionary<string, string> postContent = new Dictionary<string, string>()
+            {
+                {"_csrf-frontend", frontEndToken }
+            };
+            string publish = $"{publishUrl}/{regJournal.RegistrationId}";
+            response = await httpClient.PostAsync(publish, new FormUrlEncodedContent(postContent));
+
+            if (response.StatusCode != HttpStatusCode.OK)
+            {
+                regJournal.ThrownException = new Exceptions.WebServerException();
+            }
+        }
+        private async Task<List<CollisionTableItem>> GetWigigStationsFromCollisionTable(string html)
+        {
+            HtmlDocument doc = new HtmlDocument();
+            doc.LoadHtml(html);
+
+            List<CollisionTableItem> collisionItems = new List<CollisionTableItem>();
+            var closeStations = from table in doc.DocumentNode.SelectNodes("//*[@id=\"stations-grid-container\"]/table").Cast<HtmlNode>()
+                                from tbody in table.SelectNodes("tbody").Cast<HtmlNode>()
+                                from rows in tbody.SelectNodes("tr").Cast<HtmlNode>()
+                                select rows;
+            foreach (var item in closeStations)
+            {
+                if (item.InnerText == "No results found.") break;
+                var columns = item.SelectNodes("td");
+                string id = columns[0].ChildNodes[0].InnerText;
+                bool owned = (columns[0].ChildNodes.Count == 2); // another element symbolizes users ownership.
+                string name = columns[2].InnerText;
+                string link = baseUrl + columns[2].SelectSingleNode("a").GetAttributeValue("href", "");
+                bool collision = columns[3].InnerText == "Yes";
+                string type = columns[1].InnerText;
+                collisionItems.Add(new CollisionTableItem(id, owned, name, collision, type, link));
+            }
+
+            return collisionItems;
+        }
+        #endregion
         public async Task DeleteConnectionAsync(string id)
         {
             HttpResponseMessage response = await httpClient.GetAsync("");
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+                throw new Exceptions.WebServerException();
             }
-            else
-            {
-                //todo
-                throw new NotImplementedException();
-            }
-
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
             Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend",frontEndToken }

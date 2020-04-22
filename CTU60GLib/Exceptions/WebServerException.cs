@@ -4,11 +4,11 @@ using System.Text;
 
 namespace CTU60GLib.Exceptions
 {
-    class MissingParameterException : Exception
+    class WebServerException :Exception
     {
-        public MissingParameterException(string message):base(message)
+        public WebServerException()
         {
-        }
 
+        }
     }
 }

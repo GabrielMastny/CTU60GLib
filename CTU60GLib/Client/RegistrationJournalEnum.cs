@@ -6,6 +6,10 @@ namespace CTU60GLib.Client
 {
 	public enum RegistrationJournalPhaseEnum
 	{
-		InputValidation
+		InputValidation,
+		Localization,
+		TechnicalSpecification,
+		CollissionSummary,
+		Published
 	}
 }
