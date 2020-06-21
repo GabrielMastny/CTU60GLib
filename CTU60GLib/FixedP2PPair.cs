@@ -5,13 +5,13 @@ using System.Text;
 
 namespace CTU60GLib
 {
-    public class FixedP2PPair
+    public class P2PSite
     {
         private const double maxDistance = 10;
         public readonly FixedStationInfo StationA;
         public readonly FixedStationInfo StationB;
 
-        public FixedP2PPair(FixedStationInfo staA, FixedStationInfo staB)
+        public P2PSite(FixedStationInfo staA, FixedStationInfo staB)
         {
             if (staA == null || staB == null) throw new Exceptions.MissingParameterException("Missing pair station");
             double distance = CalculateCoordinatesDistance(staA, staB);

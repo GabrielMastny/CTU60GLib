@@ -11,46 +11,71 @@ using System.Threading.Tasks;
 using Client.Json;
 using Newtonsoft.Json.Linq;
 using CTU60GLib.CollisionTable;
+using System.Globalization;
 using System.Text.RegularExpressions;
-using System.Runtime.CompilerServices;
+using CTU60GLib.Exceptions;
 
 namespace CTU60GLib.Client
 {
-    public class CTUClient
+    public class CTUClient : IDisposable
     {
-        private const string baseUrl = "https://60ghz.ctu.cz";
-        private const string createFSPTPUrl = "/en/create-fs";
-        private const string createWIGIGUrl = "/en/create-wigig";
-        private const string stationUrl = "/en/station";
-        private const string publishUrl = "/en/publish";
+        
         private HttpClient httpClient;
         private string frontEndToken ="";
-
+        private bool isolationConsent = false;
+        /// <summary>
+        /// webclient for http comunication with web 60ghz.ctu.cz, automatically calls login method.
+        /// </summary>
+        /// <param name="login">username for login form</param>
+        /// <param name="pass">password for login form</param>
+        /// <param name="isolationConsent">if true, client sends automaticaly declaration of isolation for wirelless site in collission, otherwise is sent email with collision table</param>
+        public CTUClient(string login, string pass,bool isolationConsent = false) : this()
+        {
+            Task.Run(() => this.LoginAsync(login, pass)).Wait();
+            this.isolationConsent = isolationConsent;
+        }
+        /// <summary>
+        /// webclient for http comunication with web 60ghz.ctu.cz
+        /// </summary>
         public CTUClient()
+        {
+            httpClient = ConfigureHttpClient();
+        }
+
+        /// <summary>
+        /// Configures httpClient for comunication with ctu web.
+        /// </summary>
+        /// <returns>configured httpClient</returns>
+        private HttpClient ConfigureHttpClient()
         {
             HttpClientHandler handler = new HttpClientHandler()
             {
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
             };
 
-            httpClient = new HttpClient(handler);
-            httpClient.BaseAddress = new Uri(baseUrl);
+            HttpClient httpClient = new HttpClient(handler);
+            httpClient.BaseAddress = new Uri(CtuUrlConstants.BaseUrl);
             httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/html"));
             httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             httpClient.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("gzip"));
             httpClient.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("deflate"));
-            httpClient.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("cs", 0.9));
+            //httpClient.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("cs", 0.9));
             httpClient.DefaultRequestHeaders.AcceptEncoding.Add(new StringWithQualityHeaderValue("en", 0.6));
-
+            return httpClient;
         }
+        /// <summary>
+        /// Logs in to ctu web via given credentials and save cookies to httpclient.
+        /// </summary>
+        /// <param name="login">username for login form</param>
+        /// <param name="pass">password for login form</param>
         public async Task LoginAsync(string login,string pass)
         {
-            HttpResponseMessage response = await httpClient.GetAsync("prihlaseni");
+            HttpResponseMessage response = await httpClient.GetAsync(CtuUrlConstants.LoginUrl);
             if(response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                throw new Exceptions.WebServerException();
+                throw new Exceptions.WebServerException("Error Ocured while logingin.",response.StatusCode);
             }
-            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+            frontEndToken = ObtainFrontEndToken(response.Content.ReadAsStreamAsync()).Result;
             Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend",frontEndToken },
@@ -59,49 +84,94 @@ namespace CTU60GLib.Client
                 {"login-button","" }
             };
 
-            response = await httpClient.PostAsync("/cs/prihlaseni", new FormUrlEncodedContent(postContent));
-
-            if (response.StatusCode != HttpStatusCode.OK) { }//todo throw exception
+            response = httpClient.PostAsync(CtuUrlConstants.LoginUrl, new FormUrlEncodedContent(postContent)).Result;
+            if (response.RequestMessage.RequestUri.ToString() == (CtuUrlConstants.BaseUrl + CtuUrlConstants.LoginUrl))
+            {
+                throw new Exceptions.InvalidMailOrPasswordException();
+            } else if (response.StatusCode != HttpStatusCode.OK)
+            {
+                throw new Exceptions.WebServerException("Ctu web did not respond correctly", response.StatusCode);
+            }
+            else if(response.RequestMessage.RequestUri.ToString() != CtuUrlConstants.BaseUrl + CtuUrlConstants.MainPageUrl)
+            {
+                throw new Exceptions.WebServerException("Ctu web did not respond correctly", response.StatusCode);
+            }
         }
+        /// <summary>
+        /// Logs out user from ctu web
+        /// </summary>
+        /// <returns></returns>
+        public async Task Logout()
+        {
+            
+            HttpResponseMessage response = await httpClient.GetAsync("");
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                throw new Exceptions.WebServerException("ctu web did not respond correctly",response.StatusCode);
+            }
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+            Dictionary<string, string> postContent = new Dictionary<string, string>()
+            {
+                {"_csrf-frontend",frontEndToken }
+            };
+            response = await httpClient.PostAsync(CtuUrlConstants.LogoutUrl, new FormUrlEncodedContent(postContent));
+            if (response.StatusCode != HttpStatusCode.OK || response.RequestMessage.RequestUri.ToString() != CtuUrlConstants.BaseUrl + CtuUrlConstants.MainPageUrl)
+            {
+                throw new Exceptions.WebServerException("ctu web did not respond correctly", response.StatusCode);
+            }
+        }
+        /// <summary>
+        /// obtains cross site request forgery token from source code
+        /// </summary>
+        /// <param name="stream">stream with source code from ctu web</param>
+        /// <returns>csrf token</returns>
         private async Task<string> ObtainFrontEndToken(Task<Stream> stream)
         {
             HtmlDocument doc = new HtmlDocument();
             doc.Load(await stream);
             HtmlNode mdnode = doc.DocumentNode.SelectNodes("//meta[@name='csrf-token']").FirstOrDefault();
-
-            if (mdnode != null || mdnode == default) { }//todo throw exception
-
+            if (mdnode == null || mdnode == default) { throw new WebServerException("missing csrf token");}
             return mdnode.Attributes["content"].Value;
         }
 
         #region P2P
-
-        public async Task<RegistrationJournal> AddPTPConnectionAsync(FixedP2PPair fpP2P)
+        /// <summary>
+        /// attempts to publish new p2p wirelless site.
+        /// </summary>
+        /// <param name="p2P">p2p data</param>
+        /// <returns>publication journal, marks if publication was succesful or where and why publication stopped</returns>
+        public async Task<RegistrationJournal> AddPTPSiteAsync(P2PSite p2P)
         {
             RegistrationJournal regJournal = new RegistrationJournal();
-            if (fpP2P == null)
+            if (p2P == null)
             {
                 regJournal.ThrownException = new Exceptions.MissingParameterException("Missing fixed p2p pair");
                 return regJournal;
             }
             regJournal.NextPhase();
-            await PTPLocalisation(fpP2P, regJournal);
+            await PTPLocalisation(p2P, regJournal);
             if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
             regJournal.NextPhase();
-            await PTPTechnicalSpec(fpP2P, regJournal);
+            await PTPTechnicalSpec(p2P, regJournal);
             if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
             regJournal.NextPhase();
-            await PTPCollisionAndPublishing(fpP2P, regJournal);
+            await PTPCollisionAndPublishing(p2P, regJournal);
             if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
             regJournal.NextPhase();
             return regJournal;
         }
-        private async Task PTPLocalisation(FixedP2PPair fpP2P, RegistrationJournal regJournal)
+        /// <summary>
+        /// if succesfull, creates draft with name and gps cordinates.
+        /// </summary>
+        /// <param name="p2P">p2p data</param>
+        /// <param name="regJournal"> registration journal with information abou registration process</param>
+        /// <returns></returns>
+        private async Task PTPLocalisation(P2PSite p2P, RegistrationJournal regJournal)
         {
-            HttpResponseMessage response = await httpClient.GetAsync(createFSPTPUrl);
-            if (response.StatusCode != System.Net.HttpStatusCode.OK)
+            HttpResponseMessage response = await httpClient.GetAsync(CtuUrlConstants.CreateFSPTPUrl);
+            if (response.StatusCode != System.Net.HttpStatusCode.OK || response.RequestMessage.RequestUri.LocalPath != CtuUrlConstants.CreateFSPTPUrl)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.",response.StatusCode);
                 return;
             }
             frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
@@ -109,30 +179,34 @@ namespace CTU60GLib.Client
             {
                 {"_csrf-frontend", frontEndToken },
                 {"list-stations","my" },
-                {"Station[a][name]", fpP2P.StationA.Name},
-                {"Station[b][name]",fpP2P.StationB.Name},
-                {"Station[a][lng]", fpP2P.StationA.Longitude.ToString() },
-                {"Station[a][lat]",fpP2P.StationA.Latitude.ToString() },
-                {"Station[b][lng]",fpP2P.StationB.Longitude.ToString() },
-                {"Station[b][lat]",fpP2P.StationB.Latitude.ToString() }
+                {"Station[a][name]", p2P.StationA.Name},
+                {"Station[b][name]",p2P.StationB.Name},
+                {"Station[a][lng]", p2P.StationA.Longitude.ToString(CultureInfo.GetCultureInfo("en-US")) },
+                {"Station[a][lat]",p2P.StationA.Latitude.ToString(CultureInfo.GetCultureInfo("en-US")) },
+                {"Station[b][lng]",p2P.StationB.Longitude.ToString(CultureInfo.GetCultureInfo("en-US")) },
+                {"Station[b][lat]",p2P.StationB.Latitude.ToString(CultureInfo.GetCultureInfo("en-US")) }
             };
-
-            response = await httpClient.PostAsync(createFSPTPUrl, new FormUrlEncodedContent(postContent));
-
-            if (response.StatusCode != HttpStatusCode.OK)
+            response = await httpClient.PostAsync(CtuUrlConstants.CreateFSPTPUrl, new FormUrlEncodedContent(postContent));
+            if (response.StatusCode != HttpStatusCode.OK || !new Regex(@"^/en/station/[0-9]+/2$").IsMatch(response.RequestMessage.RequestUri.LocalPath))
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("web ctu did not respond properly.",response.StatusCode);
                 return;
             }
             regJournal.RegistrationId = response.RequestMessage.RequestUri.ToString().Split('/')[5];
         }
-        private async Task PTPTechnicalSpec(FixedP2PPair fpP2P, RegistrationJournal regJournal)
+        /// <summary>
+        /// if succesfull, updates draft with technical specs
+        /// </summary>
+        /// <param name="fpP2P">fixed p2p data</param>
+        /// <param name="regJournal"> registration journal with information abou registration process</param>
+        /// <returns></returns>
+        private async Task PTPTechnicalSpec(P2PSite fpP2P, RegistrationJournal regJournal)
         {
-            string techSpecUrl = $"{stationUrl}/{regJournal.RegistrationId}/2";
+            string techSpecUrl = $"{CtuUrlConstants.StationUrl}/{regJournal.RegistrationId}/2";
             HttpResponseMessage response = await httpClient.GetAsync(techSpecUrl);
             if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
                 return;
             }
 
@@ -162,42 +236,88 @@ namespace CTU60GLib.Client
 
             if (response.StatusCode != HttpStatusCode.OK)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
             }
         }
-        private async Task PTPCollisionAndPublishing(FixedP2PPair fpP2P, RegistrationJournal regJournal)
+        /// <summary>
+        /// if succesfull, then p2p is officialy published on ctu, otherwise saved as draft
+        /// </summary>
+        /// <param name="fpP2P"></param>
+        /// <param name="regJournal"></param>
+        /// <returns></returns>
+        private async Task PTPCollisionAndPublishing(P2PSite fpP2P, RegistrationJournal regJournal)
         {
-            string techSpecUrl = $"{stationUrl}/{regJournal.RegistrationId}/3";
+            string techSpecUrl = $"{CtuUrlConstants.StationUrl}/{regJournal.RegistrationId}/3";
             HttpResponseMessage response = await httpClient.GetAsync(techSpecUrl);
             if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
                 return;
             }
             frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
 
             List<CollisionTableItem> closeStations = await GetFixedPTPStationsFromCollisionTable(await response.Content.ReadAsStringAsync());
             regJournal.CollisionStations = closeStations.Where(x => x.Collision == true).ToList();
-            regJournal.CloseStations = closeStations.Where(x => x.Collision == false).ToList();
+            regJournal.CloseStations = closeStations;
 
-            if (regJournal.CollisionStations.Count > 0)
+            Dictionary<string, string> postContent = new Dictionary<string, string>()
+                {
+                    {"_csrf-frontend", frontEndToken }
+                };
+            if (regJournal.CollisionStations.Where((x) => x.Owned == true).Count() == regJournal.CollisionStations.Count && isolationConsent) //collision only with owned stations.
+            {
+                
+                string declare = $"{CtuUrlConstants.DeclareUrl}/{regJournal.RegistrationId}";
+                response = await httpClient.PostAsync(declare, new FormUrlEncodedContent(postContent));
+                if (response.StatusCode != HttpStatusCode.OK)
+                {
+                    regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
+                }
+            }
+            else if(regJournal.CollisionStations.Count > 0) // collision list contains unowned stations
             {
                 regJournal.ThrownException = new Exceptions.CollisionDetectedException();
                 return;
             }
-
-            Dictionary<string, string> postContent = new Dictionary<string, string>()
+            else // no collision ocured
             {
-                {"_csrf-frontend", frontEndToken }
-            };
-            string publish = $"{publishUrl}/{regJournal.RegistrationId}"; 
-            response = await httpClient.PostAsync(publish, new FormUrlEncodedContent(postContent));
-
-            if (response.StatusCode != HttpStatusCode.OK)
-            {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                string publish = $"{CtuUrlConstants.PublishUrl}/{regJournal.RegistrationId}";
+                response = await httpClient.PostAsync(publish, new FormUrlEncodedContent(postContent));
+                if (response.StatusCode != HttpStatusCode.OK)
+                {
+                    regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
+                }
             }
-
+        }
+        /// <summary>
+        /// updates already exisiting p2p record
+        /// </summary>
+        /// <param name="p2P">p2p data</param>
+        /// <returns>publication journal, marks if publication was succesful or where and why publication stopped</returns>
+        public async Task<RegistrationJournal> UpdatePTPConnectionAsync(P2PSite p2P)
+        {
+            RegistrationJournal regJournal = new RegistrationJournal();
+            if (p2P == null)
+            {
+                regJournal.ThrownException = new Exceptions.MissingParameterException("Missing fixed p2p pair");
+                return regJournal;
+            }
+            regJournal.RegistrationId = p2P.StationB.CTUId.ToString();
+            regJournal.NextPhase();
+            HttpResponseMessage response = await httpClient.GetAsync("");
+            if (response.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
+                return regJournal;
+            }
+            frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
+            await PTPTechnicalSpec(p2P, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            await PTPCollisionAndPublishing(p2P, regJournal);
+            if (regJournal.SuccessfullRegistration != RegistrationSuccesEnum.Pending) return regJournal;
+            regJournal.NextPhase();
+            return regJournal;
         }
         private async Task<List<CollisionTableItem>> GetFixedPTPStationsFromCollisionTable(string html)
         {
@@ -217,7 +337,7 @@ namespace CTU60GLib.Client
 
                 bool owned = (columns[1].ChildNodes.Count == 2); // another element symbolizes users ownership.
                 string name = columns[2].InnerText;
-                string link = baseUrl + columns[2].SelectSingleNode("a").GetAttributeValue("href", "");
+                string link = CtuUrlConstants.BaseUrl + columns[2].SelectSingleNode("a").GetAttributeValue("href", "");
                 bool collision = columns[3].InnerText == "Yes";
                 string type = columns[4].InnerText;
                 collisionItems.Add(new CollisionTableItem(id, owned, name, collision, type, link));
@@ -230,6 +350,11 @@ namespace CTU60GLib.Client
         #endregion
 
         #region WIGIG
+        /// <summary>
+        ///  Attempts to publish wigig site
+        /// </summary>
+        /// <param name="wigig">wigig data</param>
+        /// <returns>publication journal, marks if publication was succesful or where and why publication stopped</returns>
         public async Task<RegistrationJournal> AddWIGIG_PTP_PTMPConnectionAsync(WigigPTMPUnitInfo wigig)
         {
             RegistrationJournal regJournal = new RegistrationJournal();
@@ -250,12 +375,18 @@ namespace CTU60GLib.Client
             regJournal.NextPhase();
             return regJournal;
         }
+        /// <summary>
+        /// if succesfull, creates draft with name and gps cordinates.
+        /// </summary>
+        /// <param name="wigig">wigig data</param>
+        /// <param name="regJournal"> registration journal with information abou registration process</param>
+        /// <returns></returns>
         private async Task WigigLocalisation(WigigPTMPUnitInfo wigig, RegistrationJournal regJournal)
         {
-            HttpResponseMessage response = await httpClient.GetAsync(createWIGIGUrl);
+            HttpResponseMessage response = await httpClient.GetAsync(CtuUrlConstants.CreateWIGIGUrl);
             if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
                 return;
             }
 
@@ -265,26 +396,31 @@ namespace CTU60GLib.Client
                 {"_csrf-frontend", frontEndToken },
                 {"list-stations","my" },
                 {"Station[name]",wigig.Name },
-                {"Station[lng]",wigig.Longitude.ToString() },
-                {"Station[lat]",wigig.Latitude.ToString() },
+                {"Station[lng]",wigig.Longitude.ToString(CultureInfo.GetCultureInfo("en-US")) },
+                {"Station[lat]",wigig.Latitude.ToString(CultureInfo.GetCultureInfo("en-US")) },
                 {"StationWigig[direction]",wigig.Orientation.ToString() }
             };
 
-            response = await httpClient.PostAsync(createWIGIGUrl, new FormUrlEncodedContent(postContent));
-
-            if (response.StatusCode != HttpStatusCode.OK)
+            response = await httpClient.PostAsync(CtuUrlConstants.CreateWIGIGUrl, new FormUrlEncodedContent(postContent));
+            if (response.StatusCode != HttpStatusCode.OK || !new Regex(@"^/en/station/[0-9]+/2$").IsMatch(response.RequestMessage.RequestUri.LocalPath))
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
             }
             regJournal.RegistrationId = response.RequestMessage.RequestUri.ToString().Split('/')[5];
         }
+        /// <summary>
+        /// if succesfull, creates draft with name, gps cordinates and azimut.
+        /// </summary>
+        /// <param name="wigig">wigig data</param>
+        /// <param name="regJournal"> registration journal with information abou registration process</param>
+        /// <returns></returns>
         private async Task WigigTechnicalSpec(WigigPTMPUnitInfo wigig, RegistrationJournal regJournal)
         {
-            string techSpecUrl = $"{stationUrl}/{regJournal.RegistrationId}/2";
+            string techSpecUrl = $"{CtuUrlConstants.StationUrl}/{regJournal.RegistrationId}/2";
             HttpResponseMessage response = await httpClient.GetAsync(techSpecUrl);
             if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
                 return;
             }
             frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
@@ -303,47 +439,57 @@ namespace CTU60GLib.Client
             };
 
             response = await httpClient.PostAsync(response.RequestMessage.RequestUri, new FormUrlEncodedContent(postContent));
-
             if (response.StatusCode != HttpStatusCode.OK)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
                 return;
             }
-            string pp = "pp";
-            string kk = "pp";
-
-            var q = pp.GetHashCode();
-            var qq = kk.GetHashCode();
         }
+        /// <summary>
+        /// if succesfull, then wigig is officialy published on ctu, otherwise saved as draft
+        /// </summary>
+        /// <param name="wigig"></param>
+        /// <param name="regJournal"></param>
+        /// <returns></returns>
         private async Task WigigCollisionAndPublishing(WigigPTMPUnitInfo wigig, RegistrationJournal regJournal)
         {
-            string collUrl = $"{stationUrl}/{regJournal.RegistrationId}/3";
+            string collUrl = $"{CtuUrlConstants.StationUrl}/{regJournal.RegistrationId}/3";
             HttpResponseMessage response = await httpClient.GetAsync(collUrl);
             if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
             }
             frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
             List<CollisionTableItem> collisions = await GetWigigStationsFromCollisionTable(await response.Content.ReadAsStringAsync());
             regJournal.CollisionStations = collisions.Where(x => x.Collision == true).ToList();
             regJournal.CloseStations = collisions.Where(x => x.Collision == false).ToList();
 
-            if (regJournal.CollisionStations.Count > 0)
-            {
-                regJournal.ThrownException = new Exceptions.CollisionDetectedException(); 
-                return;
-            }
-
             Dictionary<string, string> postContent = new Dictionary<string, string>()
             {
                 {"_csrf-frontend", frontEndToken }
             };
-            string publish = $"{publishUrl}/{regJournal.RegistrationId}";
-            response = await httpClient.PostAsync(publish, new FormUrlEncodedContent(postContent));
-
-            if (response.StatusCode != HttpStatusCode.OK)
+            if (regJournal.CollisionStations.Where((x) => x.Owned == true).Count() == regJournal.CollisionStations.Count && isolationConsent) //collision only with owned stations.
             {
-                regJournal.ThrownException = new Exceptions.WebServerException();
+                string declare = $"{CtuUrlConstants.DeclareUrl}/{regJournal.RegistrationId}";
+                response = await httpClient.PostAsync(declare, new FormUrlEncodedContent(postContent));
+                if (response.StatusCode != HttpStatusCode.OK)
+                {
+                    regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
+                }
+            }
+            else if (regJournal.CollisionStations.Count > 0) // collision list contains unowned stations
+            {
+                regJournal.ThrownException = new Exceptions.CollisionDetectedException();
+                return;
+            }
+            else // no collision ocured
+            {
+                string publish = $"{CtuUrlConstants.PublishUrl}/{regJournal.RegistrationId}";
+                response = await httpClient.PostAsync(publish, new FormUrlEncodedContent(postContent));
+                if (response.StatusCode != HttpStatusCode.OK)
+                {
+                    regJournal.ThrownException = new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
+                }
             }
         }
         private async Task<List<CollisionTableItem>> GetWigigStationsFromCollisionTable(string html)
@@ -363,7 +509,7 @@ namespace CTU60GLib.Client
                 string id = columns[0].ChildNodes[0].InnerText;
                 bool owned = (columns[0].ChildNodes.Count == 2); // another element symbolizes users ownership.
                 string name = columns[2].InnerText;
-                string link = baseUrl + columns[2].SelectSingleNode("a").GetAttributeValue("href", "");
+                string link = CtuUrlConstants.BaseUrl + columns[2].SelectSingleNode("a").GetAttributeValue("href", "");
                 bool collision = columns[3].InnerText == "Yes";
                 string type = columns[1].InnerText;
                 collisionItems.Add(new CollisionTableItem(id, owned, name, collision, type, link));
@@ -372,12 +518,17 @@ namespace CTU60GLib.Client
             return collisionItems;
         }
         #endregion
+        /// <summary>
+        /// deletes record from web
+        /// </summary>
+        /// <param name="id">id of record from ctu web</param>
+        /// <returns></returns>
         public async Task DeleteConnectionAsync(string id)
         {
             HttpResponseMessage response = await httpClient.GetAsync("");
             if (response.StatusCode != System.Net.HttpStatusCode.OK)
             {
-                throw new Exceptions.WebServerException();
+                throw new Exceptions.WebServerException("",response.StatusCode);
             }
             frontEndToken = await ObtainFrontEndToken(response.Content.ReadAsStreamAsync());
             Dictionary<string, string> postContent = new Dictionary<string, string>()
@@ -385,17 +536,34 @@ namespace CTU60GLib.Client
                 {"_csrf-frontend",frontEndToken }
             };
 
-            response = await httpClient.PostAsync($"/en/station/delete?id={id}", new FormUrlEncodedContent(postContent));
+            response = await httpClient.PostAsync($"{CtuUrlConstants.DeleteUrl}?id={id}", new FormUrlEncodedContent(postContent));
 
-            if (response.StatusCode != HttpStatusCode.OK) { }//todo throw exception
+            if (response.StatusCode != HttpStatusCode.OK) 
+            {
+                throw new Exceptions.WebServerException("Web ctu did not respond properly.", response.StatusCode);
+            }
         }
-        private async Task<List<CtuWirelessUnit>> GetApiStationsAsync(bool onlyMy)
+        /// <summary>
+        /// gets metadata about ctu sites
+        /// </summary>
+        /// <param name="onlyMy">if true return only users meta, otherwise returns all meta</param>
+        /// <param name="id">id of record from ctu web</param>
+        /// <returns>list of serialized json</returns>
+        private async Task<List<CtuWirelessUnit>> GetApiStationsAsync(bool onlyMy = true, string id = default)
         {
-            string param = (onlyMy) ? "my-stations" : "all-stations";
+            //needs review!!
+            string param = default;
+            if (id != default)
+                param = CtuUrlConstants.ApiEndpointTypeConcreteStation + $"/{id}";
+            else
+            param = onlyMy ? CtuUrlConstants.ApiEndpointTypeMyStations : CtuUrlConstants.ApiEndpointTypeAllStations;
 
-            HttpResponseMessage response = await httpClient.GetAsync($"/api/v1/station/{param}");
+            var t = CtuUrlConstants.ApiBase + CtuUrlConstants.ApiVersion + CtuUrlConstants.ApiStationEndpoint + param;
+
+            HttpResponseMessage response = await httpClient.GetAsync(CtuUrlConstants.ApiBase + CtuUrlConstants.ApiVersion + CtuUrlConstants.ApiStationEndpoint + param);
             try
             {
+                
                 var x = response.Content.ReadAsStringAsync().Result;
 
                 var jObj = JObject.Parse(x).Children().Children().ToList()[1].ToList();
@@ -412,7 +580,7 @@ namespace CTU60GLib.Client
             catch (Exception e)
             {
 
-                throw;
+                throw e;
             }
 
         }
@@ -424,7 +592,13 @@ namespace CTU60GLib.Client
         {
             return await GetApiStationsAsync(true);   
         }
-
-
+        public async Task<List<CtuWirelessUnit>> GetStationByIdAsync(string id)
+        {
+            return await GetApiStationsAsync(id: id);
+        }
+        public void Dispose()
+        {
+            Task.Run(() => this.Logout()).Wait();
+        }
     }
 }

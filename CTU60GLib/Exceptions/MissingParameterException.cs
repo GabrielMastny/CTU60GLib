@@ -4,7 +4,7 @@ using System.Text;
 
 namespace CTU60GLib.Exceptions
 {
-    class MissingParameterException : Exception
+    public class MissingParameterException : Exception
     {
         public MissingParameterException(string message):base(message)
         {

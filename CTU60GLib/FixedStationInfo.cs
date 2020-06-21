@@ -9,7 +9,7 @@ namespace CTU60GLib
         private int rsn;
 
         public int RSN { get { return rsn; } }
-        public FixedStationInfo(string name, string serialNumber, string MAC, string longitude, string latitude, string volume, string channelWidth, string power, string frequency,string rsn) :base(name, serialNumber, MAC, longitude, latitude, volume, channelWidth, power, frequency)
+        public FixedStationInfo(string name, string serialNumber, string MAC, string longitude, string latitude, string volume, string channelWidth, string power, string frequency,string ctuId, string ownerId, string rsn) :base(name, serialNumber, MAC, longitude, latitude, volume, channelWidth, power, frequency, ctuId, ownerId)
         {
             if (rsn == null || rsn == string.Empty) throw new Exceptions.MissingParameterException("Missing rsn value.");
             int toParsei;

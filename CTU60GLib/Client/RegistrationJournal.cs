@@ -6,6 +6,7 @@ namespace CTU60GLib.Client
 {
     public class RegistrationJournal
     {
+        private RegistrationJournalTypeEnum type;
         private RegistrationJournalPhaseEnum phase;
         private RegistrationSuccesEnum successfullRegistration;
         private List<CollisionTable.CollisionTableItem> closeStations;
@@ -44,17 +45,32 @@ namespace CTU60GLib.Client
                 }
             }
         }
-
+        public RegistrationJournalTypeEnum Type
+        {
+            get { return type; }
+        }
         public string RegistrationId
         {
             get { return registrationId; }
-            set { if (registrationId == null) registrationId = value; }
+            set 
+            {   
+                if (registrationId == null)
+                {
+                    registrationId = value;
+                    type = (phase == RegistrationJournalPhaseEnum.InputValidation) ? RegistrationJournalTypeEnum.Update : RegistrationJournalTypeEnum.Registration;
+                    if (type == RegistrationJournalTypeEnum.Update) phase = RegistrationJournalPhaseEnum.TechnicalSpecification;
+                }
+            }
         }
 
         public RegistrationJournalPhaseEnum NextPhase()
         {
+            
             if (successfullRegistration == RegistrationSuccesEnum.Pending)
             {
+                if (type == RegistrationJournalTypeEnum.Update && phase == RegistrationJournalPhaseEnum.InputValidation)
+                    phase = RegistrationJournalPhaseEnum.TechnicalSpecification;
+                else
                 phase += 1;
             }
             else if (successfullRegistration != RegistrationSuccesEnum.Pending)
@@ -63,11 +79,11 @@ namespace CTU60GLib.Client
                 successfullRegistration = RegistrationSuccesEnum.Successfull;
             return phase;
         }
-        public RegistrationJournal()
+        public RegistrationJournal(int? id = null)
         {
+            type = (id.HasValue) ? RegistrationJournalTypeEnum.Update : RegistrationJournalTypeEnum.Registration;
             phase = RegistrationJournalPhaseEnum.InputValidation;
             successfullRegistration = RegistrationSuccesEnum.Pending;
-            
         }
     }
 }

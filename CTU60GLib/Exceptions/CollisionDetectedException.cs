@@ -4,7 +4,11 @@ using System.Text;
 
 namespace CTU60GLib.Exceptions
 {
-    class CollisionDetectedException
+    public class CollisionDetectedException :Exception
     {
+        public CollisionDetectedException()
+        {
+
+        }
     }
 }

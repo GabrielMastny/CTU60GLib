@@ -4,7 +4,7 @@ using System.Text;
 
 namespace CTU60GLib.Exceptions
 {
-    class InvalidPropertyValueException : Exception
+    public class InvalidPropertyValueException : Exception
     {
         public string ExpectedVauleInfo { get; }
         public string CurrentValue { get; }
